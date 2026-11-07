@@ -68,6 +68,16 @@ public:
     bool is_dark_move(Move m) const { return type_of(board[from_sq(m)]) == DARK; }
     bool is_capture(Move m) const { return board[to_sq(m)] != NO_PIECE; }
 
+    // NO_TYPE unless the urn contains exactly one possible identity (possibly several copies).
+    PieceType sole_identity(Color c) const {
+        PieceType only = NO_TYPE;
+        for (int sl = 0; sl < NUM_SLOTS; ++sl)
+            if (urn[c][sl] > 0) {
+                if (only != NO_TYPE) return NO_TYPE;
+                only = slot_type(sl);
+            }
+        return only;
+    }
     bool king_attacked(Color c, int k) const;
     bool ray_attacked(Color c, int k, int d) const;  // rook / cannon / facing-king attack along one ray
     bool in_check() const { return king_attacked(stm, kingSq[stm]); }

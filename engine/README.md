@@ -77,16 +77,48 @@ leaves the urn unchanged, and moving one is a chance node with up to six outcome
 ## UCI
 
 Options: `Hash` (MB, default 64), `Threads` (default 1), `EvalFile` (path of a JQN1 net),
-`Clear Hash`, `NNUEQuant` (default true), and every search parameter as a spin option, with the
+`Clear Hash`, `Ponder` (default false), `NNUEQuant` (default true), and every search parameter as a spin option, with the
 measured configuration as its default (`uci` lists them). `NodesTime N` makes the clock run on
 nodes, N per millisecond, for tests on a loaded host.
 
-`go` takes `wtime btime winc binc movestogo`, `movetime`, `depth`, `nodes`, `infinite` and
+`go` takes `wtime btime winc binc movestogo`, `movetime`, `depth`, `nodes`, `ponder`, `infinite` and
 `searchmoves`. Commands besides UCI: `d` (the position and its FEN), `eval`, `moves` (legal
 moves), `see MOVE`, `perft N` (move paths, reveals not expanded; 44, 1,926 and 83,907 from the
 start for N = 1 to 3), `perftc N` (with chance outcomes), `bench [DEPTH]` (default 7), `nnbench`
 and `selfplay` (training records, `src/selfplay.cpp`). Arguments on the command line run one
 command and exit, as in `jqe perft 3`.
+
+### Conditional pondering
+
+With `setoption name Ponder value true`, a search can return `bestmove MOVE ponder REPLY`.
+The reply comes from the PV and is emitted only when both moves describe a single successor
+from our information perspective. A face-down mover is deterministic when its urn has just
+one possible identity type, even if several copies remain. An ambiguous reveal by either
+mover, or an unknown victim revealed by our own capture, suppresses the prediction.
+An opponent capture of our face-down piece does not reveal its identity to us and leaves our
+urn unchanged. This feature does not run a separate prediction search after an ambiguous reveal.
+
+The GUI applies our move and the predicted reply, sends that resulting position with the
+complete observed history, then sends `go ponder` with the next turn's limits. If the reply
+matches, send `ponderhit` alone: the current search continues and its move clock starts at
+the hit. Background wall time, or background nodes in `NodesTime` mode, do not consume that
+clock. `info` still reports the full search effort. Explicit `depth` and `nodes` limits apply
+to the whole search; reaching them early holds the result until `ponderhit` or `stop`.
+If the reply differs, send `stop`, drain its `bestmove`, then send the actual position and a
+new `go`. `Ponder` controls prediction output; an explicit `go ponder` always follows this lifecycle.
+
+UCI predictions remain four coordinates. When constructing a predicted history for a
+singleton face-down move, the GUI must append its inferred reveal identity as described below;
+it must also validate any authoritative observations before declaring a hit. A GUI that rejects
+all covered moves needs its own singleton support to use this branch. Native clock values
+come from the original `go ponder`; `ponderhit` cannot replace them.
+
+Build and run the focused policy/PV and real-process protocol checks with:
+
+```sh
+cmake --build engine/build -j4 --target jqe jqe_ponder_test
+ctest --test-dir engine/build --output-on-failure
+```
 
 ### Positions and moves
 

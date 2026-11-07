@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace jq {
@@ -125,6 +127,11 @@ using Clock = std::chrono::steady_clock;
 
 struct Shared {
     std::atomic<bool> stop{false};
+    std::atomic<bool> pondering{false};
+    std::mutex controlMutex;
+    std::condition_variable controlChanged;
+    std::atomic<int64_t> chargedStartMs{0};
+    std::atomic<uint64_t> chargedStartNodes{0};
     Clock::time_point start;
     int64_t optimumMs = 0, maximumMs = 0;
     bool timed = false;
@@ -240,6 +247,11 @@ struct Worker {
         return n;
     }
     int64_t elapsed() const { return P_NodesTime ? int64_t(total_nodes() / uint64_t(P_NodesTime)) : G.elapsed(); }
+    int64_t charged_elapsed() const {
+        if (P_NodesTime)
+            return int64_t((total_nodes() - G.chargedStartNodes.load()) / uint64_t(P_NodesTime));
+        return G.elapsed() - G.chargedStartMs.load();
+    }
     int id = 0;
     Position pos;
     int16_t history[2][NUM_SQ][NUM_SQ];
@@ -372,7 +384,7 @@ struct Worker {
 
 void Worker::check_time() {
     if (id != 0 || (++calls & 1023) != 0) return;
-    if (G.timed && elapsed() >= G.maximumMs) G.stop = true;
+    if (G.timed && !G.pondering && charged_elapsed() >= G.maximumMs) G.stop = true;
     if (G.nodeLimit && total_nodes() >= uint64_t(G.nodeLimit)) G.stop = true;
 }
 
@@ -1036,7 +1048,7 @@ Value Worker::search(Value alpha, Value beta, int depth, int ply, bool pvNode, b
                 if (pvNode) {
                     pv[ply][0] = m;
                     int len = 1;
-                    if (!dark)
+                    if (!dark || p.sole_identity(us) != NO_TYPE)
                         for (int k = 0; k < pvLen[ply + 1]; ++k) pv[ply][len++] = pv[ply + 1][k];
                     pvLen[ply] = len;
                 }
@@ -1173,16 +1185,16 @@ void Worker::iterate() {
             report(d, v, BOUND_EXACT);
             instab = instab * 0.5 + (d > 1 && bestMove != lastBest ? 1.0 : 0.0);
             lastBest = bestMove;
-            if (G.timed) {
+            if (G.timed && !G.pondering) {
                 double soft = double(G.optimumMs) * (G.clockMode ? P_TmSoft : 55) / 100;
                 if (G.clockMode && P_TmStab)
                     soft *= std::clamp(1.0 + P_TmStab / 100.0 * (instab - 0.5), 0.5, 2.5);
                 if (G.clockMode && P_TmFall && d >= 5)
                     soft *= 1.0 + P_TmFall / 100.0 * std::clamp((lastIterScore - v) / 100.0, -0.5, 1.0);
-                if (elapsed() >= int64_t(soft)) break;
+                if (charged_elapsed() >= int64_t(soft)) break;
             }
             if (std::abs(v) >= VALUE_MATE_IN_MAX_PLY && d >= 2 * (VALUE_MATE - std::abs(v)) + 4) {
-                if (G.timed) break;
+                if (G.timed && !G.pondering) break;
             }
         }
     }
@@ -1298,15 +1310,64 @@ void Searcher::clear() {
     impl_->TT.clear();
 }
 
-void Searcher::stop() { impl_->G.stop = true; }
-void Searcher::prepare() { impl_->G.stop = false; }
+// A prediction must describe a single successor from our information perspective.
+// Our own captures reveal the victim to us; an opponent capture does not.
+Move ponder_reply(const Position& root, const SearchResult& result) {
+    if (result.pv.size() < 2 || result.pv[0] != result.best) return MOVE_NONE;
+    Position p = root;
+    PieceType reveal = p.is_dark_move(result.best) ? p.sole_identity(p.stm) : NO_TYPE;
+    if (p.is_dark_move(result.best) && reveal == NO_TYPE) return MOVE_NONE;
+    PieceType captured = NO_TYPE;
+    if (type_of(p.board[to_sq(result.best)]) == DARK) {
+        captured = p.sole_identity(~p.stm);
+        if (captured == NO_TYPE) return MOVE_NONE;
+    }
+    if (!p.apply_observed(result.best, reveal, captured)) return MOVE_NONE;
+    Move reply = base_move(result.pv[1]);
+    reveal = p.is_dark_move(reply) ? p.sole_identity(p.stm) : NO_TYPE;
+    if (p.is_dark_move(reply) && reveal == NO_TYPE) return MOVE_NONE;
+    if (!p.apply_observed(reply, reveal, NO_TYPE)) return MOVE_NONE;
+    return make_move(from_sq(reply), to_sq(reply), reveal);
+}
+
+void Searcher::stop() {
+    Shared& G = impl_->G;
+    {
+        std::lock_guard<std::mutex> lock(G.controlMutex);
+        G.stop = true;
+        G.pondering = false;
+    }
+    G.controlChanged.notify_all();
+}
+
+void Searcher::prepare(bool ponder) {
+    Shared& G = impl_->G;
+    std::lock_guard<std::mutex> lock(G.controlMutex);
+    G.start = Clock::now();
+    G.chargedStartMs = 0;
+    G.chargedStartNodes = 0;
+    for (auto& w : impl_->workers) w->nodes = 0;
+    G.stop = false;
+    G.pondering = ponder;
+}
+
+void Searcher::ponderhit() {
+    Shared& G = impl_->G;
+    {
+        std::lock_guard<std::mutex> lock(G.controlMutex);
+        if (!G.pondering) return;
+        G.chargedStartMs = G.elapsed();
+        G.chargedStartNodes = impl_->workers[0]->total_nodes();
+        G.pondering = false;
+    }
+    G.controlChanged.notify_all();
+}
 
 SearchResult Searcher::go(const Position& root, const Limits& limits, const std::function<void(const std::string&)>& info,
                           bool resetStop) {
     Shared& G = impl_->G;
     auto& workers = impl_->workers;
-    G.start = Clock::now();
-    if (resetStop) G.stop = false;
+    if (resetStop) prepare(limits.ponder);
     G.depthLimit = limits.depth;
     G.nodeLimit = limits.nodes;
     G.timed = false;
@@ -1335,7 +1396,6 @@ SearchResult Searcher::go(const Position& root, const Limits& limits, const std:
     G.rootMoves = limits.searchMoves;
     for (auto& w : workers) {
         w->pos = root;
-        w->nodes = 0;
         w->chanceLayers = 0;
         w->maxLayers = P_MaxChanceLayers +
                        (P_ChanceLateDark && root.darkCount[RED] + root.darkCount[BLACK] <= P_ChanceLateDark ? P_ChanceLateAdd : 0);
@@ -1351,13 +1411,22 @@ SearchResult Searcher::go(const Position& root, const Limits& limits, const std:
     Move legal[MAX_MOVES];
     const int nLegal = root.gen_legal(legal);
     SearchResult res;
-    if (nLegal == 0) return res;
-
+    auto waitForHit = [&] {
+        // A depth/node limit (or a terminal root) may finish a ponder search early.
+        // Keep its result private until the GUI confirms the prediction or stops it.
+        std::unique_lock<std::mutex> lock(G.controlMutex);
+        G.controlChanged.wait(lock, [&] { return !G.pondering.load(); });
+    };
+    if (nLegal == 0) {
+        waitForHit();
+        return res;
+    }
     std::vector<std::thread> helpers;
     for (std::size_t i = 1; i < workers.size(); ++i) helpers.emplace_back([&workers, i] { workers[i]->iterate(); });
     workers[0]->iterate();
     G.stop = true;
     for (auto& t : helpers) t.join();
+    waitForHit();
 
     const Worker* chosen = workers[0].get();
     if (P_SmpVote && workers.size() > 1) {

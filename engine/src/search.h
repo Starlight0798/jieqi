@@ -19,6 +19,7 @@ struct Limits {
     int inc[2] = {0, 0};
     int movestogo = 0;
     bool infinite = false;
+    bool ponder = false;
     std::vector<Move> searchMoves;  // root restricted to these moves when not empty
 };
 
@@ -31,6 +32,9 @@ struct SearchResult {
     std::vector<Move> pv;
 };
 
+// Legal predicted reply from the PV, or MOVE_NONE if new observations make the branch uncertain.
+// A uniquely determined face-down reply carries its inferred reveal type.
+Move ponder_reply(const Position& root, const SearchResult& result);
 // Tunable integer parameters exposed as UCI spin options (for SPSA later).
 struct Param {
     const char* name;
@@ -50,9 +54,10 @@ public:
     void resize_hash(std::size_t mb);
     void clear();  // histories and transposition table
     void stop();   // may be called from another thread
-    void prepare();  // clears the stop flag before go() is started on another thread (so an early stop() holds)
+    void ponderhit();  // continue the current search, charging time/nodes only from the hit
+    void prepare(bool ponder = false);  // call before starting the search thread; preserves early stop/hit
     // Runs synchronously; `info` receives UCI info lines from the main thread. With resetStop = false the
-    // caller must have called prepare().
+    // caller must have called prepare(limits.ponder).
     SearchResult go(const Position& root, const Limits& limits, const std::function<void(const std::string&)>& info,
                     bool resetStop = true);
     int hashfull() const;

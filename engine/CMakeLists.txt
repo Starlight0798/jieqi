@@ -32,3 +32,15 @@ target_compile_options(jqe PRIVATE -Wall -Wextra)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../native ${CMAKE_BINARY_DIR}/native_oracle EXCLUDE_FROM_ALL)
 add_executable(jqe_difftest tests/difftest.cpp)
 target_link_libraries(jqe_difftest PRIVATE jqe_core jieqi_core)
+
+# Conditional ponder policy and protocol lifecycle regression checks.
+enable_testing()
+add_executable(jqe_ponder_test tests/ponder.cpp)
+target_link_libraries(jqe_ponder_test PRIVATE jqe_core)
+add_test(NAME ponder_policy COMMAND jqe_ponder_test)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME ponder_protocol COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/ponder_uci.py $<TARGET_FILE:jqe>)
+    set_tests_properties(ponder_protocol PROPERTIES TIMEOUT 60)
+endif()

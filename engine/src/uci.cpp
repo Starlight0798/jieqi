@@ -36,6 +36,7 @@ struct Engine {
     Searcher searcher{1, 64};
     std::thread thread;
     std::string evalFile;
+    bool ponder = false;
 
     Engine() { pos.set_fen(START_FEN); }
     ~Engine() { wait(); }
@@ -51,6 +52,7 @@ struct Engine {
         out("id author jqe authors");
         out("option name Hash type spin default 64 min 1 max 16384");
         out("option name Threads type spin default 1 min 1 max 256");
+        out("option name Ponder type check default false");
         out("option name EvalFile type string default <empty>");
         out("option name Clear Hash type button");
         out("option name NNUEQuant type check default true");
@@ -68,6 +70,7 @@ struct Engine {
         wait();
         if (name == "Hash") searcher.resize_hash(std::size_t(std::max(1, std::stoi(value))));
         else if (name == "Threads") searcher.set_threads(std::stoi(value));
+        else if (name == "Ponder") ponder = value == "true";
         else if (name == "Clear Hash") searcher.clear();
         else if (name == "NNUEQuant") { nnue::set_quantized(value == "true"); searcher.clear(); }
         else if (name == "EvalFile") {
@@ -117,6 +120,14 @@ struct Engine {
         Limits lim;
         std::string tok;
         while (is >> tok) {
+            if (tok == "searchmoves") {
+                while (is >> tok) {
+                    const Move move = parse_move_coords(tok);
+                    if (move == MOVE_NONE) break;
+                    lim.searchMoves.push_back(move);
+                }
+                if (!is) break;
+            }
             if (tok == "depth") is >> lim.depth;
             else if (tok == "nodes") is >> lim.nodes;
             else if (tok == "movetime") is >> lim.movetime;
@@ -126,16 +137,20 @@ struct Engine {
             else if (tok == "binc") is >> lim.inc[BLACK];
             else if (tok == "movestogo") is >> lim.movestogo;
             else if (tok == "infinite") lim.infinite = true;
-            else if (tok == "searchmoves")
-                while (is >> tok) lim.searchMoves.push_back(parse_move_coords(tok));
+            else if (tok == "ponder") lim.ponder = true;
         }
         wait();
         Position root = pos;
-        searcher.prepare();  // a stop that arrives before the search thread runs must not be lost
+        searcher.prepare(lim.ponder);  // preserve stop/ponderhit even before the thread starts
         thread = std::thread([this, root, lim] {
             static const std::function<void(const std::string&)> info = [](const std::string& s) { out(s); };
             const SearchResult r = searcher.go(root, lim, info, false);
-            out(r.best == MOVE_NONE ? "bestmove (none)" : "bestmove " + move_str(r.best));
+            std::string line = r.best == MOVE_NONE ? "bestmove (none)" : "bestmove " + move_str(r.best);
+            if (ponder && r.best != MOVE_NONE) {
+                const Move reply = ponder_reply(root, r);
+                if (reply != MOVE_NONE) line += " ponder " + move_str(reply);
+            }
+            out(line);
         });
     }
 
@@ -183,6 +198,7 @@ int uci_loop(int argc, char** argv) {
         else if (cmd == "setoption") engine.cmd_setoption(is);
         else if (cmd == "position") { engine.wait(); engine.cmd_position(is); }
         else if (cmd == "go") engine.cmd_go(is);
+        else if (cmd == "ponderhit") engine.searcher.ponderhit();
         else if (cmd == "stop") engine.wait();
         else if (cmd == "quit") break;
         else if (cmd == "d") out(engine.pos.pretty());
