@@ -14,9 +14,9 @@ namespace jq {
 // default): a probe into a table of hundreds of megabytes then costs a cache miss, not a cache miss plus a page walk.
 // Release with std::free.
 inline void* alloc_large(std::size_t bytes) {
-    constexpr std::size_t HUGE = std::size_t(2) << 20;
-    const bool big = bytes >= HUGE / 4;
-    const std::size_t align = big ? HUGE : 64;
+    constexpr std::size_t HugePageSize = std::size_t(2) << 20;
+    const bool big = bytes >= HugePageSize / 4;
+    const std::size_t align = big ? HugePageSize : 64;
     const std::size_t size = ((bytes ? bytes : 1) + align - 1) / align * align;
     void* p = std::aligned_alloc(align, size);
     if (!p) return nullptr;

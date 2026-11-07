@@ -9,7 +9,9 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#if defined(__SSE__)
 #include <xmmintrin.h>
+#endif
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
 #define JQ_AVX2 1
@@ -177,7 +179,11 @@ void set_quantized(bool on) {
 bool quantized() { return g_quant; }
 
 void unload() { g_loaded = false; }
-void set_flush_denormals() { _mm_setcsr(_mm_getcsr() | 0x8040); }  // FTZ | DAZ for this thread
+void set_flush_denormals() {
+#if defined(__SSE__)
+    _mm_setcsr(_mm_getcsr() | 0x8040);  // FTZ | DAZ for this thread
+#endif
+}
 bool loaded() { return g_loaded; }
 int ft_size() { return net.ft + 1; }
 
